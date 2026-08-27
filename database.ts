@@ -337,7 +337,10 @@ export async function backupDatabase() {
 export function getDashboardData(): DashboardData {
   if (useFirestore()) {
     const state = firestoreState || { seats: {}, requests: [], lastYearUsers: [] };
-    return { requests: [...state.requests].sort((a, b) => b.timestamp - a.timestamp), seats: structuredClone(state.seats), lastYearUsers: structuredClone(state.lastYearUsers), auditLog: structuredClone(firestoreAuditLog) };
+    // Request handlers must edit an isolated snapshot.  A shallow array copy
+    // still shares each request object and makes the transaction baseline look
+    // as if it was already changed, causing status edits to be skipped.
+    return { requests: structuredClone(state.requests).sort((a, b) => b.timestamp - a.timestamp), seats: structuredClone(state.seats), lastYearUsers: structuredClone(state.lastYearUsers), auditLog: structuredClone(firestoreAuditLog) };
   }
   const requests = (db.prepare("SELECT * FROM requests ORDER BY timestamp DESC").all() as any[]).map(requestFromRow);
   const seats: DashboardData["seats"] = {};
