@@ -72,7 +72,7 @@ let firestoreAuditLog: AuditRecord[] = [];
 let productionPassword = process.env.ADMIN_PASSWORD || "mmbm";
 const productionSessions = new Map<string, number>();
 const productionLoginAttempts = new Map<string, number[]>();
-const useFirestore = () => process.env.USE_FIRESTORE === "true";
+const useFirestore = () => process.env.USE_FIRESTORE === "true" || process.env.NETLIFY === "true";
 
 async function firestoreForProduction() {
   if (!useFirestore()) return null;
