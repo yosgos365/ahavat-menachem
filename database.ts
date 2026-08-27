@@ -91,7 +91,9 @@ let firestoreAuditLog: AuditRecord[] = [];
 let productionPasswordSalt = crypto.randomBytes(16).toString("hex");
 let productionPasswordHash = crypto.pbkdf2Sync(process.env.ADMIN_PASSWORD || "mmbm", productionPasswordSalt, 210_000, 32, "sha256").toString("hex");
 const productionLoginAttempts = new Map<string, number[]>();
-const useFirestore = () => process.env.USE_FIRESTORE === "true" || process.env.NETLIFY === "true";
+// Serverless hosts have no persistent writable disk. They always use the
+// shared Firestore state, even if an environment variable was omitted.
+const useFirestore = () => process.env.USE_FIRESTORE === "true" || process.env.NETLIFY === "true" || process.env.VERCEL === "1";
 
 async function firestoreForProduction() {
   if (!useFirestore()) return null;
