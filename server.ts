@@ -33,6 +33,7 @@ let driveClientPromise: Promise<drive_v3.Drive | null> | null = null;
 
 const hasDriveBridge = () => Boolean(GOOGLE_APPS_SCRIPT_URL && PAYMENT_STORAGE_SECRET);
 const FIREBASE_IMAGE_PREFIX = "firebase:";
+const FIREBASE_IMAGE_TOKEN_PREFIX = "firebase-";
 
 const firebaseStorageBucket = () => {
   // The Firebase Admin app is initialized together with Firestore before any
@@ -45,7 +46,14 @@ const firebaseStorageBucket = () => {
 const firebaseImagePathFromUrl = (imageUrl: string) => {
   if (!imageUrl.startsWith("/api/payment-images/")) return null;
   const id = decodeURIComponent(imageUrl.slice("/api/payment-images/".length));
-  return id.startsWith(FIREBASE_IMAGE_PREFIX) ? id.slice(FIREBASE_IMAGE_PREFIX.length) : null;
+  return firebaseImagePathFromId(id);
+};
+
+const firebaseImagePathFromId = (id: string) => {
+  if (id.startsWith(FIREBASE_IMAGE_PREFIX)) return id.slice(FIREBASE_IMAGE_PREFIX.length);
+  if (!id.startsWith(FIREBASE_IMAGE_TOKEN_PREFIX)) return null;
+  try { return Buffer.from(id.slice(FIREBASE_IMAGE_TOKEN_PREFIX.length), "base64url").toString("utf8"); }
+  catch { return null; }
 };
 
 async function callDriveBridge(payload: Record<string, string>) {
@@ -186,7 +194,9 @@ async function storePaymentImage(paymentImage: unknown, requestId: string): Prom
         metadata: { requestId },
       },
     });
-    return `/api/payment-images/${encodeURIComponent(`${FIREBASE_IMAGE_PREFIX}${objectName}`)}`;
+    // Keep the path slash-free: Netlify decodes encoded slashes in redirects.
+    // A base64url token is safe both in a route parameter and in the database.
+    return `/api/payment-images/${FIREBASE_IMAGE_TOKEN_PREFIX}${Buffer.from(objectName).toString("base64url")}`;
   }
   if (hasDriveBridge()) {
     const stored = await callDriveBridge({ action: "upload", filename, mimeType: match[1], data: match[2] });
@@ -290,10 +300,13 @@ const deleteStoredPaymentImage = async (imageUrl: string) => {
   await fs.unlink(path.join(UPLOAD_DIR, filename)).catch(() => undefined);
 };
 
-app.get("/api/payment-images/:fileId", async (req, res) => {
+app.get("/api/payment-images/*", async (req, res) => {
   const token = typeof req.query.token === "string" ? req.query.token : "";
   if (!isValidSession(token)) return res.status(401).end();
-  const firebasePath = req.params.fileId.startsWith(FIREBASE_IMAGE_PREFIX) ? req.params.fileId.slice(FIREBASE_IMAGE_PREFIX.length) : null;
+  // The wildcard keeps legacy Firebase links readable after Netlify decodes
+  // their %2F during the function redirect.
+  const fileId = typeof req.params[0] === "string" ? req.params[0] : "";
+  const firebasePath = firebaseImagePathFromId(fileId);
   if (firebasePath) {
     const bucket = firebaseStorageBucket();
     if (!bucket) return res.status(503).end();
@@ -312,7 +325,7 @@ app.get("/api/payment-images/:fileId", async (req, res) => {
   }
   if (hasDriveBridge()) {
     try {
-      const image = await readFromDriveBridge(req.params.fileId);
+      const image = await readFromDriveBridge(fileId);
       res.setHeader("Cache-Control", "private, no-store");
       res.type(image.mimeType || "image/jpeg").send(Buffer.from(image.data!, "base64"));
     } catch {
@@ -323,7 +336,7 @@ app.get("/api/payment-images/:fileId", async (req, res) => {
   const drive = await getDriveClient();
   if (!drive) return res.status(503).end();
   try {
-    const image = await drive.files.get({ fileId: req.params.fileId, alt: "media", supportsAllDrives: true }, { responseType: "stream" });
+    const image = await drive.files.get({ fileId, alt: "media", supportsAllDrives: true }, { responseType: "stream" });
     res.setHeader("Cache-Control", "private, no-store");
     (image.data as any).pipe(res);
   } catch {
