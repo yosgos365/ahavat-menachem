@@ -69,8 +69,8 @@ let db: any;
 let firestorePromise: Promise<ReturnType<typeof getFirestore> | null> | null = null;
 let firestoreState: ApplicationState | null = null;
 let firestoreAuditLog: AuditRecord[] = [];
-let productionPassword = process.env.ADMIN_PASSWORD || "mmbm";
-const productionSessions = new Map<string, number>();
+let productionPasswordSalt = crypto.randomBytes(16).toString("hex");
+let productionPasswordHash = crypto.pbkdf2Sync(process.env.ADMIN_PASSWORD || "mmbm", productionPasswordSalt, 210_000, 32, "sha256").toString("hex");
 const productionLoginAttempts = new Map<string, number[]>();
 const useFirestore = () => process.env.USE_FIRESTORE === "true" || process.env.NETLIFY === "true";
 
@@ -131,6 +131,20 @@ const requestFromRow = (row: any): RequestRecord => ({
 
 const passwordHash = (password: string, salt: string) => crypto.pbkdf2Sync(password, salt, 210_000, 32, "sha256").toString("hex");
 
+const createProductionSession = (expiresAt: number) => {
+  const payload = Buffer.from(JSON.stringify({ expiresAt })).toString("base64url");
+  const signature = crypto.createHmac("sha256", productionPasswordHash).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+};
+
+const verifyProductionSession = (token: string, now: number) => {
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return false;
+  const expected = crypto.createHmac("sha256", productionPasswordHash).update(payload).digest("base64url");
+  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return false;
+  try { return Number(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).expiresAt) > now; } catch { return false; }
+};
+
 const setting = (key: string) => db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value?: string } | undefined;
 const setSetting = (key: string, value: string) => db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 
@@ -184,6 +198,15 @@ async function importLegacyDatabase() {
 export async function initDatabase() {
   if (useFirestore()) {
     await syncFromFirestore();
+    const firestore = await firestoreForProduction();
+    const security = await firestore?.collection("system").doc("security").get();
+    const savedSecurity = security?.data();
+    if (typeof savedSecurity?.passwordSalt === "string" && typeof savedSecurity?.passwordHash === "string") {
+      productionPasswordSalt = savedSecurity.passwordSalt;
+      productionPasswordHash = savedSecurity.passwordHash;
+    } else if (firestore) {
+      await firestore.collection("system").doc("security").set({ passwordSalt: productionPasswordSalt, passwordHash: productionPasswordHash });
+    }
     if (!firestoreState) {
       firestoreState = { seats: {}, requests: [], lastYearUsers: structuredClone(TASHפו_USERS) };
       await syncToFirestore(firestoreState);
@@ -368,8 +391,14 @@ export function getRequest(id: string) {
   return row ? requestFromRow(row) : undefined;
 }
 
-export function setPassword(password: string) {
-  if (useFirestore()) { productionPassword = password; return; }
+export async function setPassword(password: string) {
+  if (useFirestore()) {
+    productionPasswordSalt = crypto.randomBytes(16).toString("hex");
+    productionPasswordHash = passwordHash(password, productionPasswordSalt);
+    const firestore = await firestoreForProduction();
+    await firestore?.collection("system").doc("security").set({ passwordSalt: productionPasswordSalt, passwordHash: productionPasswordHash });
+    return;
+  }
   const salt = crypto.randomBytes(16).toString("hex");
   setSetting("password_salt", salt);
   setSetting("password_hash", passwordHash(password, salt));
@@ -380,11 +409,11 @@ export function attemptLogin(password: string, ip: string) {
   if (useFirestore()) {
     const attempts = (productionLoginAttempts.get(ip) || []).filter(time => time > now - 15 * 60 * 1000);
     if (attempts.length >= 5) return { success: false, locked: true };
-    const accepted = crypto.timingSafeEqual(Buffer.from(productionPassword), Buffer.from(password.padEnd(productionPassword.length, "\0").slice(0, productionPassword.length)));
+    const candidate = passwordHash(password, productionPasswordSalt);
+    const accepted = crypto.timingSafeEqual(Buffer.from(productionPasswordHash, "hex"), Buffer.from(candidate, "hex"));
     if (!accepted) { attempts.push(now); productionLoginAttempts.set(ip, attempts); return { success: false, locked: false }; }
     productionLoginAttempts.delete(ip);
-    const token = crypto.randomBytes(32).toString("base64url");
-    productionSessions.set(crypto.createHash("sha256").update(token).digest("hex"), now + SESSION_DURATION_MS);
+    const token = createProductionSession(now + SESSION_DURATION_MS);
     return { success: true, token };
   }
   db.prepare("DELETE FROM login_attempts WHERE attempted_at < ?").run(now - 15 * 60 * 1000);
@@ -407,19 +436,14 @@ export function isValidSession(token?: string) {
   if (!token) return false;
   const now = Date.now();
   if (useFirestore()) {
-    const hash = crypto.createHash("sha256").update(token).digest("hex");
-    for (const [key, expiresAt] of productionSessions) if (expiresAt <= now) productionSessions.delete(key);
-    return (productionSessions.get(hash) || 0) > now;
+    return verifyProductionSession(token, now);
   }
   db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
   return Boolean(db.prepare("SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?").get(crypto.createHash("sha256").update(token).digest("hex"), now));
 }
 
 export function revokeSession(token?: string) {
-  if (useFirestore()) {
-    if (token) productionSessions.delete(crypto.createHash("sha256").update(token).digest("hex"));
-    return;
-  }
+  if (useFirestore()) return;
   if (token) db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(crypto.createHash("sha256").update(token).digest("hex"));
 }
 

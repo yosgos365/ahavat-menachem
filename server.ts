@@ -23,8 +23,24 @@ const MAX_PAYMENT_IMAGE_BYTES = 5 * 1024 * 1024;
 const SEAT_IDS = new Set(SEATS.map((seat) => seat.id));
 const DEVELOPER_PASSWORD = process.env.DEVELOPER_PASSWORD || "213223";
 const DEVELOPER_SESSION_MS = 15 * 60 * 1000;
-const developerSessions = new Map<string, { deviceId: string; expiresAt: number }>();
 let driveClientPromise: Promise<drive_v3.Drive | null> | null = null;
+
+const createDeveloperToken = (deviceId: string, expiresAt: number) => {
+  const payload = Buffer.from(JSON.stringify({ deviceId, expiresAt })).toString("base64url");
+  const signature = crypto.createHmac("sha256", DEVELOPER_PASSWORD).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+};
+
+const isDeveloperTokenValid = (token: string, deviceId: string) => {
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return false;
+  const expected = crypto.createHmac("sha256", DEVELOPER_PASSWORD).update(payload).digest("base64url");
+  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return false;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return data.deviceId === deviceId && Number(data.expiresAt) > Date.now();
+  } catch { return false; }
+};
 
 async function getDriveClient(): Promise<drive_v3.Drive | null> {
   if (driveClientPromise) return driveClientPromise;
@@ -155,9 +171,7 @@ const adminAuth = async (req: express.Request, res: express.Response, next: expr
 const developerAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const token = req.header("X-Developer-Token") || "";
   const deviceId = req.header("X-Developer-Device") || "";
-  const session = developerSessions.get(token);
-  if (!session || session.expiresAt < Date.now() || session.deviceId !== deviceId) {
-    developerSessions.delete(token);
+  if (!isDeveloperTokenValid(token, deviceId)) {
     return res.status(403).json({ error: "נדרשת כניסת מפתח מהמכשיר המורשה." });
   }
   next();
@@ -182,9 +196,8 @@ app.post("/api/admin/developer/unlock", adminAuth, (req, res) => {
   const password = typeof req.body.password === "string" ? req.body.password : "";
   const deviceId = typeof req.body.deviceId === "string" ? req.body.deviceId.trim() : "";
   if (!deviceId || password !== DEVELOPER_PASSWORD) return res.status(403).json({ error: "סיסמת המפתח אינה נכונה." });
-  const token = crypto.randomBytes(32).toString("hex");
-  developerSessions.set(token, { deviceId, expiresAt: Date.now() + DEVELOPER_SESSION_MS });
-  res.json({ token, expiresAt: Date.now() + DEVELOPER_SESSION_MS });
+  const expiresAt = Date.now() + DEVELOPER_SESSION_MS;
+  res.json({ token: createDeveloperToken(deviceId, expiresAt), expiresAt });
 });
 
 const deleteStoredPaymentImage = async (imageUrl: string) => {
@@ -363,7 +376,7 @@ app.post("/api/admin/change-password", adminAuth, async (req, res) => {
   if (!newPassword || newPassword.length < 4) {
     return res.status(400).json({ error: "Password too short" });
   }
-  setPassword(newPassword);
+  await setPassword(newPassword);
   res.json({ success: true });
 });
 
