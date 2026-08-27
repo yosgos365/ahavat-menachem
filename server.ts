@@ -683,7 +683,7 @@ let applicationInitialized = false;
 
 export async function initializeApplication() {
   if (applicationInitialized) return;
-  await fs.mkdir(UPLOAD_DIR, { recursive: true });
+  if (!process.env.NETLIFY) await fs.mkdir(UPLOAD_DIR, { recursive: true });
   await initDatabase();
   await migrateLegacyPaymentImages();
   applicationInitialized = true;

@@ -1,9 +1,8 @@
 import serverless from "serverless-http";
-import { app, initializeApplication } from "../../server";
-
-const apiHandler = serverless(app);
 
 export const handler = async (event: any, context: any) => {
+  process.env.NETLIFY = "true";
+  const { app, initializeApplication } = await import("../../server");
   await initializeApplication();
-  return apiHandler(event, context);
+  return serverless(app)(event, context);
 };
