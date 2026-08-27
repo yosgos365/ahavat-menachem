@@ -300,12 +300,14 @@ const deleteStoredPaymentImage = async (imageUrl: string) => {
   await fs.unlink(path.join(UPLOAD_DIR, filename)).catch(() => undefined);
 };
 
-app.get("/api/payment-images/*", async (req, res) => {
+const servePaymentImage = async (req: express.Request, res: express.Response) => {
   const token = typeof req.query.token === "string" ? req.query.token : "";
   if (!isValidSession(token)) return res.status(401).end();
   // The wildcard keeps legacy Firebase links readable after Netlify decodes
   // their %2F during the function redirect.
-  const fileId = typeof req.params[0] === "string" ? req.params[0] : "";
+  const fileId = typeof req.params.fileId === "string"
+    ? req.params.fileId
+    : (typeof req.params[0] === "string" ? req.params[0] : "");
   const firebasePath = firebaseImagePathFromId(fileId);
   if (firebasePath) {
     const bucket = firebaseStorageBucket();
@@ -313,11 +315,12 @@ app.get("/api/payment-images/*", async (req, res) => {
     try {
       const file = bucket.file(firebasePath);
       const [metadata] = await file.getMetadata();
+      // A Netlify Function must finish writing before its handler resolves.
+      // Piping a stream here can end the serverless response early, resulting
+      // in a broken <img> even though the object exists in Firebase Storage.
+      const [contents] = await file.download();
       res.setHeader("Cache-Control", "private, no-store");
-      res.type(metadata.contentType || "image/jpeg");
-      file.createReadStream()
-        .on("error", () => { if (!res.headersSent) res.status(404).end(); else res.end(); })
-        .pipe(res);
+      res.type(metadata.contentType || "image/jpeg").send(contents);
     } catch {
       res.status(404).end();
     }
@@ -342,7 +345,12 @@ app.get("/api/payment-images/*", async (req, res) => {
   } catch {
     res.status(404).end();
   }
-});
+};
+
+// New paths are slash-free and use the stable parameter route. The wildcard
+// remains only for older records whose Firebase object path contains '/'.
+app.get("/api/payment-images/:fileId", servePaymentImage);
+app.get("/api/payment-images/*", servePaymentImage);
 
 app.post("/api/admin/developer/clear-requests", developerAuth, async (req, res) => {
   const db = await readDB();
