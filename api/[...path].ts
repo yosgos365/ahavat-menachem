@@ -5,6 +5,9 @@ import { app, initializeApplication } from "../server";
 // application remains the single implementation used locally and on Netlify.
 export default async function handler(req: Request, res: Response) {
   process.env.VERCEL = "1";
+  // Do not depend on the dashboard setting being propagated to a new
+  // serverless instance: this API always persists through Firestore.
+  process.env.USE_FIRESTORE = "true";
   await initializeApplication();
   return app(req, res);
 }
