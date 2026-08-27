@@ -20,11 +20,41 @@ const DATA_DIR = process.env.DATA_DIR || process.cwd();
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const DRIVE_PAYMENT_FOLDER_ID = process.env.DRIVE_PAYMENT_FOLDER_ID || "1j4rGV1iSveiQlzAErId5hUAKhNe7CTRJ";
 const SERVICE_ACCOUNT_PATH = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(process.cwd(), "firebase-service-account.json");
+const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL || "";
+const PAYMENT_STORAGE_SECRET = process.env.PAYMENT_STORAGE_SECRET || "";
 const MAX_PAYMENT_IMAGE_BYTES = 5 * 1024 * 1024;
 const SEAT_IDS = new Set(SEATS.map((seat) => seat.id));
 const DEVELOPER_PASSWORD = process.env.DEVELOPER_PASSWORD || "213223";
 const DEVELOPER_SESSION_MS = 15 * 60 * 1000;
 let driveClientPromise: Promise<drive_v3.Drive | null> | null = null;
+
+const hasDriveBridge = () => Boolean(GOOGLE_APPS_SCRIPT_URL && PAYMENT_STORAGE_SECRET);
+
+async function callDriveBridge(payload: Record<string, string>) {
+  if (!hasDriveBridge()) throw new Error("אחסון צילומי התשלום אינו מוגדר");
+  const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ ...payload, secret: PAYMENT_STORAGE_SECRET }),
+    redirect: "follow",
+  });
+  if (!response.ok) throw new Error("שירות שמירת הצילומים אינו זמין");
+  const data = await response.json() as { ok?: boolean; error?: string; fileId?: string; mimeType?: string; data?: string };
+  if (!data.ok) throw new Error(data.error || "לא ניתן לשמור את צילום התשלום");
+  return data;
+}
+
+async function readFromDriveBridge(fileId: string) {
+  if (!hasDriveBridge()) throw new Error("אחסון צילומי התשלום אינו מוגדר");
+  const url = new URL(GOOGLE_APPS_SCRIPT_URL);
+  url.searchParams.set("fileId", fileId);
+  url.searchParams.set("secret", PAYMENT_STORAGE_SECRET);
+  const response = await fetch(url, { redirect: "follow" });
+  if (!response.ok) throw new Error("שירות הצגת הצילומים אינו זמין");
+  const data = await response.json() as { ok?: boolean; error?: string; mimeType?: string; data?: string };
+  if (!data.ok || !data.data) throw new Error(data.error || "צילום התשלום לא נמצא");
+  return data;
+}
 
 const createDeveloperToken = (deviceId: string, expiresAt: number) => {
   const payload = Buffer.from(JSON.stringify({ deviceId, expiresAt })).toString("base64url");
@@ -127,6 +157,11 @@ async function storePaymentImage(paymentImage: unknown, requestId: string): Prom
   if (!image.length || image.length > MAX_PAYMENT_IMAGE_BYTES) throw new Error("גודל תמונת התשלום המרבי הוא 5MB");
   const extension = match[1] === "image/png" ? "png" : match[1] === "image/webp" ? "webp" : "jpg";
   const filename = `${requestId}.${extension}`;
+  if (hasDriveBridge()) {
+    const stored = await callDriveBridge({ action: "upload", filename, mimeType: match[1], data: match[2] });
+    if (!stored.fileId) throw new Error("לא ניתן לשמור את צילום התשלום");
+    return `/api/payment-images/${stored.fileId}`;
+  }
   const drive = await getDriveClient();
   if (drive) {
     const created = await drive.files.create({
@@ -138,6 +173,7 @@ async function storePaymentImage(paymentImage: unknown, requestId: string): Prom
     if (!created.data.id) throw new Error("לא ניתן לשמור את צילום התשלום ב-Drive");
     return `/api/payment-images/${created.data.id}`;
   }
+  if (process.env.NETLIFY === "true") throw new Error("אחסון צילומי התשלום אינו מוגדר");
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
   await fs.writeFile(path.join(UPLOAD_DIR, filename), image);
   return `/uploads/${filename}`;
@@ -204,6 +240,10 @@ app.post("/api/admin/developer/unlock", adminAuth, (req, res) => {
 const deleteStoredPaymentImage = async (imageUrl: string) => {
   if (imageUrl.startsWith("/api/payment-images/")) {
     const fileId = imageUrl.slice("/api/payment-images/".length);
+    if (hasDriveBridge()) {
+      if (fileId) await callDriveBridge({ action: "delete", fileId }).catch(() => undefined);
+      return;
+    }
     const drive = await getDriveClient();
     if (drive && fileId) await drive.files.delete({ fileId, supportsAllDrives: true }).catch(() => undefined);
     return;
@@ -216,6 +256,16 @@ const deleteStoredPaymentImage = async (imageUrl: string) => {
 app.get("/api/payment-images/:fileId", async (req, res) => {
   const token = typeof req.query.token === "string" ? req.query.token : "";
   if (!isValidSession(token)) return res.status(401).end();
+  if (hasDriveBridge()) {
+    try {
+      const image = await readFromDriveBridge(req.params.fileId);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.type(image.mimeType || "image/jpeg").send(Buffer.from(image.data!, "base64"));
+    } catch {
+      res.status(404).end();
+    }
+    return;
+  }
   const drive = await getDriveClient();
   if (!drive) return res.status(503).end();
   try {
