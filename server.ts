@@ -3,7 +3,6 @@ import cors from "cors";
 import crypto from "node:crypto";
 import path from "path";
 import fs from "fs/promises";
-import { createServer as createViteServer } from "vite";
 import bodyParser from "body-parser";
 import { google, drive_v3 } from "googleapis";
 import { addSeatAudit, attemptLogin, clearAuditLog, findLastYearUser, getDashboardData, getSeatStatuses, initDatabase, isValidSession, readApplicationState, revokeSession, setPassword, writeApplicationState } from "./database";
@@ -693,6 +692,7 @@ export async function initializeApplication() {
 async function startServer() {
   await initializeApplication();
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
