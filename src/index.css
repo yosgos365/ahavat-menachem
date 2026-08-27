@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+:root {
+  font-family: "Noto Sans Hebrew", "Segoe UI", Arial, sans-serif;
+  color: #172033;
+  background: #f4f6f8;
+}
+
+body {
+  min-width: 320px;
+  background: #f4f6f8;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; }
+
+@media (min-width: 641px) {
+  .dashboard-tabs { border-radius: 0.75rem; }
+}
+
+@media (max-width: 640px) {
+  main { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+  input, select, textarea { font-size: 16px !important; }
+  .dashboard-tabs > button { flex: 0 0 auto; min-height: 44px; }
+  .public-seat-map {
+    grid-template-columns: repeat(34, 30px) !important;
+    grid-template-rows: repeat(18, 28px) !important;
+    gap: 4px !important;
+    padding: 0.9rem !important;
+    touch-action: pan-x pan-y;
+  }
+  .public-seat-map button, .public-seat-map > div { font-size: 0.7rem !important; }
+  .public-seat-map button { min-width: 30px; min-height: 28px; }
+}
+
+@media screen {
+  .print-map-preview {
+    height: 440px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .print-map-preview .print-map-grid {
+    zoom: 0.28;
+  }
+}
+
+@media print {
+  @page { size: A3 landscape; margin: 8mm; }
+
+  html, body, #root {
+    width: 404mm;
+    height: 281mm;
+    max-width: 404mm;
+    max-height: 281mm;
+    overflow: hidden !important;
+  }
+  body * { visibility: hidden !important; }
+  #print-map, #print-map * { visibility: visible !important; }
+  #print-map {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    overflow: visible !important;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .print-map-preview .print-map-grid {
+    zoom: 0.56 !important;
+    text-align: left;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+  .print-map-title { margin: 0 0 14mm !important; font-size: 24pt !important; }
+  .print-map-grid {
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+    font-family: "Noto Sans Hebrew", Arial, sans-serif;
+  }
+}
