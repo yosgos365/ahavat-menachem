@@ -58,6 +58,25 @@ export interface ApplicationState {
   lastYearUsers: DashboardData["lastYearUsers"];
 }
 
+// Requests are the source of truth.  The compact seat index is only a fast
+// lookup for maps, so rebuild it if an old serverless invocation ever wrote an
+// incomplete index to Firestore.
+const rebuildSeatIndex = (state: ApplicationState): ApplicationState => {
+  if (Object.keys(state.seats || {}).length || !state.requests.length) return state;
+  const seats: ApplicationState["seats"] = {};
+  for (const request of [...state.requests].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (request.status === "rejected") continue;
+    for (const seatId of request.seats || []) {
+      if (request.status === "approved") {
+        seats[seatId] = { status: "taken", owner: `${request.firstName} ${request.lastName}`.trim() };
+      } else if (!seats[seatId]) {
+        seats[seatId] = { status: "pending", reservedBy: request.id };
+      }
+    }
+  }
+  return { ...state, seats };
+};
+
 // In production this points to Render's persistent disk; locally it remains the project folder.
 const ROOT = process.env.DATA_DIR || process.cwd();
 const DB_PATH = path.join(ROOT, "synagogue.db");
@@ -98,7 +117,9 @@ async function syncFromFirestore() {
   const snapshot = await firestore.collection("system").doc("applicationState").get();
   const state = snapshot.data() as ApplicationState | undefined;
   if (!state?.requests || !state.seats || !state.lastYearUsers) return;
-  firestoreState = structuredClone(state);
+  const repaired = rebuildSeatIndex(state);
+  firestoreState = structuredClone(repaired);
+  if (repaired !== state) await syncToFirestore(repaired);
 }
 
 async function syncToFirestore(state: ApplicationState) {
@@ -283,7 +304,7 @@ export function readApplicationState(): ApplicationState {
 
 export async function writeApplicationState(state: ApplicationState) {
   if (useFirestore()) {
-    firestoreState = structuredClone(state);
+    firestoreState = structuredClone(rebuildSeatIndex(state));
     await syncToFirestore(firestoreState);
     return;
   }
