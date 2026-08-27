@@ -1,9 +1,4 @@
 {
   "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "functions": {
-    "api/[...path].ts": {
-      "includeFiles": "runtime/server.cjs"
-    }
-  }
+  "outputDirectory": "dist"
 }
