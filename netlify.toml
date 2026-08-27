@@ -12,3 +12,10 @@
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"
   status = 200
+
+# React handles the application routes in the browser.  Without this fallback,
+# opening or refreshing /admin/dashboard directly produces Netlify's 404 page.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
