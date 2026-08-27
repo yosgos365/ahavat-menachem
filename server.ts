@@ -746,8 +746,19 @@ app.get("/api/admin/export.xlsx", adminAuth, async (req, res) => {
 let applicationInitialized = false;
 
 export async function initializeApplication() {
+  // A Netlify function can stay warm after another function instance has
+  // changed Firestore. Refresh on every invocation so the public map, the
+  // dashboard and submitted forms all operate on the same current state.
+  if (process.env.NETLIFY === "true") {
+    await initDatabase();
+    if (!applicationInitialized) {
+      await migrateLegacyPaymentImages();
+      applicationInitialized = true;
+    }
+    return;
+  }
   if (applicationInitialized) return;
-  if (!process.env.NETLIFY) await fs.mkdir(UPLOAD_DIR, { recursive: true });
+  await fs.mkdir(UPLOAD_DIR, { recursive: true });
   await initDatabase();
   await migrateLegacyPaymentImages();
   applicationInitialized = true;
