@@ -3,7 +3,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/[...path].ts": {
-      "includeFiles": "dist/server.cjs"
+      "includeFiles": "runtime/server.cjs"
     }
   }
 }
