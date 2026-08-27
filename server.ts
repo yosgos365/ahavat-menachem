@@ -820,7 +820,7 @@ export async function initializeApplication() {
   // A Netlify function can stay warm after another function instance has
   // changed Firestore. Refresh on every invocation so the public map, the
   // dashboard and submitted forms all operate on the same current state.
-  if (process.env.NETLIFY === "true") {
+  if (process.env.NETLIFY === "true" || process.env.VERCEL === "1") {
     await initDatabase();
     if (!applicationInitialized) {
       await migrateLegacyPaymentImages();
@@ -859,4 +859,4 @@ async function startServer() {
   });
 }
 
-if (!process.env.NETLIFY) startServer();
+if (!process.env.NETLIFY && process.env.VERCEL !== "1") startServer();
