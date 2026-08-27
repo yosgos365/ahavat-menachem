@@ -311,7 +311,6 @@ app.post("/api/admin/developer/create-demo", developerAuth, async (req, res) => 
   const historicSeat = historic.seats.find(seat => freeSeatIds.includes(seat)) || availableSeats[0];
   const demoSeats = availableSeats.filter(seat => seat !== historicSeat);
   const requests: DBState["requests"] = [];
-  const demoImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const addDemo = (firstName: string, lastName: string, seats: string[], status: "pending" | "approved" | "rejected", lastYear?: { seats: string[]; choice: "same-seat" | "different-seats" }) => {
     const id = `demo-${now}-${requests.length}-${Math.random().toString(36).slice(2, 7)}`;
     requests.push({ id, firstName, lastName, phone: `05${String(variation + requests.length).padStart(8, "0").slice(-8)}`, seats, requestedSeats: [...seats], status, isLastYearUser: Boolean(lastYear), isDemo: true, lastYearIdentityConfirmed: Boolean(lastYear), lastYearChoice: lastYear?.choice || "not-confirmed", lastYearSeats: lastYear?.seats || [], paymentImage: "", timestamp: now - requests.length * 60000 });
@@ -342,7 +341,6 @@ app.post("/api/admin/developer/create-demo", developerAuth, async (req, res) => 
   addDemo("גד", "טויטו", [demoSeats[18]], "pending");
   addDemo("נעמי", "אלון", [demoSeats[19]], "pending");
 
-  for (const request of requests) request.paymentImage = await storePaymentImage(demoImage, request.id);
   db.requests.push(...requests);
   for (const request of requests) {
     for (const seatId of request.seats) {
