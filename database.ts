@@ -1,4 +1,3 @@
-import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -66,17 +65,25 @@ const LEGACY_PATH = path.join(ROOT, "database.json");
 const BACKUP_DIR = path.join(ROOT, "backups");
 const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 
-let db: DatabaseSync;
+let db: any;
 let firestorePromise: Promise<ReturnType<typeof getFirestore> | null> | null = null;
+let firestoreState: ApplicationState | null = null;
+let firestoreAuditLog: AuditRecord[] = [];
+let productionPassword = process.env.ADMIN_PASSWORD || "mmbm";
+const productionSessions = new Map<string, number>();
+const productionLoginAttempts = new Map<string, number[]>();
+const useFirestore = () => process.env.USE_FIRESTORE === "true";
 
 async function firestoreForProduction() {
-  if (process.env.USE_FIRESTORE !== "true") return null;
+  if (!useFirestore()) return null;
   if (firestorePromise) return firestorePromise;
   firestorePromise = (async () => {
     try {
       const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || await fs.readFile(process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(process.cwd(), "firebase-service-account.json"), "utf8");
       if (!getApps().length) initializeApp({ credential: cert(JSON.parse(raw)) });
-      return getFirestore();
+      const firestore = getFirestore();
+      firestore.settings({ ignoreUndefinedProperties: true });
+      return firestore;
     } catch (error) {
       console.error("חיבור Firestore נכשל", error);
       return null;
@@ -91,14 +98,7 @@ async function syncFromFirestore() {
   const snapshot = await firestore.collection("system").doc("applicationState").get();
   const state = snapshot.data() as ApplicationState | undefined;
   if (!state?.requests || !state.seats || !state.lastYearUsers) return;
-  db.exec("BEGIN");
-  try {
-    db.exec("DELETE FROM seats; DELETE FROM requests; DELETE FROM last_year_users;");
-    for (const [id, seat] of Object.entries(state.seats)) db.prepare("INSERT INTO seats (id, status, owner, reserved_by) VALUES (?, ?, ?, ?)").run(id, seat.status, seat.owner || null, seat.reservedBy || null);
-    for (const request of state.requests) db.prepare("INSERT INTO requests (id, first_name, last_name, phone, seats_json, requested_seats_json, status, rejection_reason, is_last_year_user, payment_image, timestamp, last_year_seats_json, seat_changes_json, last_year_identity_confirmed, last_year_choice, is_demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(request.id, request.firstName, request.lastName, request.phone, JSON.stringify(request.seats), JSON.stringify(request.requestedSeats || request.seats), request.status, request.rejectionReason || null, request.isLastYearUser ? 1 : 0, request.paymentImage, request.timestamp, JSON.stringify(request.lastYearSeats || []), JSON.stringify(request.seatChanges || []), request.lastYearIdentityConfirmed ? 1 : 0, request.lastYearChoice || "not-confirmed", request.isDemo ? 1 : 0);
-    for (const user of state.lastYearUsers) db.prepare("INSERT INTO last_year_users (id, first_name, last_name, seats_json) VALUES (?, ?, ?, ?)").run(user.id, user.firstName, user.lastName, JSON.stringify(user.seats));
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  firestoreState = structuredClone(state);
 }
 
 async function syncToFirestore(state: ApplicationState) {
@@ -137,6 +137,11 @@ const setSetting = (key: string, value: string) => db.prepare("INSERT INTO setti
 type AuditOptions = Omit<AuditRecord, "id" | "timestamp" | "action" | "actor"> & { actor?: string };
 
 function addAudit(action: string, options: AuditOptions = {}) {
+  if (useFirestore()) {
+    firestoreAuditLog.unshift({ id: Date.now(), timestamp: Date.now(), actor: options.actor || "מנהל", action, seatId: options.seatId, fromOwner: options.fromOwner, toOwner: options.toOwner, requestId: options.requestId, details: options.details });
+    firestoreAuditLog = firestoreAuditLog.slice(0, 250);
+    return;
+  }
   db.prepare("INSERT INTO seat_audit (timestamp, actor, action, seat_id, from_owner, to_owner, request_id, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .run(Date.now(), options.actor || "מנהל", action, options.seatId || null, options.fromOwner || null, options.toOwner || null, options.requestId || null, options.details || null);
 }
@@ -177,7 +182,16 @@ async function importLegacyDatabase() {
 }
 
 export async function initDatabase() {
+  if (useFirestore()) {
+    await syncFromFirestore();
+    if (!firestoreState) {
+      firestoreState = { seats: {}, requests: [], lastYearUsers: structuredClone(TASHפו_USERS) };
+      await syncToFirestore(firestoreState);
+    }
+    return;
+  }
   await fs.mkdir(BACKUP_DIR, { recursive: true });
+  const { DatabaseSync } = await import("node:sqlite");
   db = new DatabaseSync(DB_PATH);
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -216,6 +230,7 @@ export async function initDatabase() {
 }
 
 export async function backupDatabase() {
+  if (useFirestore()) return;
   await fs.mkdir(BACKUP_DIR, { recursive: true });
   const date = new Date().toISOString().slice(0, 10);
   const backup = path.join(BACKUP_DIR, `synagogue-${date}.db`);
@@ -226,6 +241,10 @@ export async function backupDatabase() {
 }
 
 export function getDashboardData(): DashboardData {
+  if (useFirestore()) {
+    const state = firestoreState || { seats: {}, requests: [], lastYearUsers: [] };
+    return { requests: [...state.requests].sort((a, b) => b.timestamp - a.timestamp), seats: structuredClone(state.seats), lastYearUsers: structuredClone(state.lastYearUsers), auditLog: structuredClone(firestoreAuditLog) };
+  }
   const requests = (db.prepare("SELECT * FROM requests ORDER BY timestamp DESC").all() as any[]).map(requestFromRow);
   const seats: DashboardData["seats"] = {};
   for (const row of db.prepare("SELECT * FROM seats").all() as any[]) seats[row.id] = { status: row.status, owner: row.owner || undefined, reservedBy: row.reserved_by || undefined };
@@ -240,6 +259,11 @@ export function readApplicationState(): ApplicationState {
 }
 
 export async function writeApplicationState(state: ApplicationState) {
+  if (useFirestore()) {
+    firestoreState = structuredClone(state);
+    await syncToFirestore(firestoreState);
+    return;
+  }
   db.exec("BEGIN");
   try {
     db.exec("DELETE FROM seats; DELETE FROM requests; DELETE FROM last_year_users;");
@@ -263,12 +287,18 @@ export async function writeApplicationState(state: ApplicationState) {
 }
 
 export function getSeatStatuses() {
+  if (useFirestore()) {
+    const seats: Record<string, { status: SeatStatus }> = {};
+    for (const [id, seat] of Object.entries(firestoreState?.seats || {})) seats[id] = { status: seat.status };
+    return seats;
+  }
   const seats: Record<string, { status: SeatStatus }> = {};
   for (const row of db.prepare("SELECT id, status FROM seats").all() as any[]) seats[row.id] = { status: row.status };
   return seats;
 }
 
 export function clearAuditLog() {
+  if (useFirestore()) { firestoreAuditLog = []; return; }
   db.exec("DELETE FROM seat_audit");
 }
 
@@ -296,7 +326,10 @@ export function findLastYearUser(firstName: string, lastName: string) {
     if (exact === saved || softNormalize(exact) === softNormalize(saved)) return true;
     return Math.min(exact.length, saved.length) >= 4 && distance(exact, saved) <= 1;
   };
-  const row = (db.prepare("SELECT * FROM last_year_users").all() as any[]).find((item) => {
+  const lastYearRows = useFirestore()
+    ? (firestoreState?.lastYearUsers || []).map(item => ({ first_name: item.firstName, last_name: item.lastName, seats_json: JSON.stringify(item.seats) }))
+    : db.prepare("SELECT * FROM last_year_users").all() as any[];
+  const row = lastYearRows.find((item: any) => {
     const storedParts = [item.first_name, item.last_name].map(normalize).filter(Boolean);
     // One-word historic entries are ambiguous: they can be either a first or
     // a family name. Ask for confirmation whenever either entered part fits.
@@ -310,6 +343,16 @@ export function findLastYearUser(firstName: string, lastName: string) {
 }
 
 export function createRequest(request: RequestRecord) {
+  if (useFirestore()) {
+    const state = firestoreState!;
+    state.requests.push({ ...structuredClone(request), status: "pending", seatChanges: [], requestedSeats: request.requestedSeats || request.seats, lastYearSeats: request.lastYearSeats || [] });
+    for (const seatId of request.seats) {
+      const seat = state.seats[seatId];
+      if (!seat || seat.status === "available") state.seats[seatId] = { status: "pending", reservedBy: request.id };
+    }
+    addAudit("נשלחה בקשה", { actor: "לקוח", requestId: request.id, details: request.seats.join(", ") });
+    return;
+  }
   db.prepare("INSERT INTO requests (id, first_name, last_name, phone, seats_json, requested_seats_json, status, is_last_year_user, payment_image, timestamp, last_year_seats_json, seat_changes_json, last_year_identity_confirmed, last_year_choice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(request.id, request.firstName, request.lastName, request.phone, JSON.stringify(request.seats), JSON.stringify(request.requestedSeats), "pending", request.isLastYearUser ? 1 : 0, request.paymentImage, request.timestamp, JSON.stringify(request.lastYearSeats), "[]", request.lastYearIdentityConfirmed ? 1 : 0, request.lastYearChoice);
   for (const seatId of request.seats) {
@@ -320,11 +363,13 @@ export function createRequest(request: RequestRecord) {
 }
 
 export function getRequest(id: string) {
+  if (useFirestore()) return firestoreState?.requests.find(request => request.id === id);
   const row = db.prepare("SELECT * FROM requests WHERE id = ?").get(id) as any;
   return row ? requestFromRow(row) : undefined;
 }
 
 export function setPassword(password: string) {
+  if (useFirestore()) { productionPassword = password; return; }
   const salt = crypto.randomBytes(16).toString("hex");
   setSetting("password_salt", salt);
   setSetting("password_hash", passwordHash(password, salt));
@@ -332,6 +377,16 @@ export function setPassword(password: string) {
 
 export function attemptLogin(password: string, ip: string) {
   const now = Date.now();
+  if (useFirestore()) {
+    const attempts = (productionLoginAttempts.get(ip) || []).filter(time => time > now - 15 * 60 * 1000);
+    if (attempts.length >= 5) return { success: false, locked: true };
+    const accepted = crypto.timingSafeEqual(Buffer.from(productionPassword), Buffer.from(password.padEnd(productionPassword.length, "\0").slice(0, productionPassword.length)));
+    if (!accepted) { attempts.push(now); productionLoginAttempts.set(ip, attempts); return { success: false, locked: false }; }
+    productionLoginAttempts.delete(ip);
+    const token = crypto.randomBytes(32).toString("base64url");
+    productionSessions.set(crypto.createHash("sha256").update(token).digest("hex"), now + SESSION_DURATION_MS);
+    return { success: true, token };
+  }
   db.prepare("DELETE FROM login_attempts WHERE attempted_at < ?").run(now - 15 * 60 * 1000);
   const attempts = db.prepare("SELECT COUNT(*) AS count FROM login_attempts WHERE ip = ?").get(ip) as { count: number };
   if (Number(attempts.count) >= 5) return { success: false, locked: true };
@@ -351,11 +406,20 @@ export function attemptLogin(password: string, ip: string) {
 export function isValidSession(token?: string) {
   if (!token) return false;
   const now = Date.now();
+  if (useFirestore()) {
+    const hash = crypto.createHash("sha256").update(token).digest("hex");
+    for (const [key, expiresAt] of productionSessions) if (expiresAt <= now) productionSessions.delete(key);
+    return (productionSessions.get(hash) || 0) > now;
+  }
   db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
   return Boolean(db.prepare("SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?").get(crypto.createHash("sha256").update(token).digest("hex"), now));
 }
 
 export function revokeSession(token?: string) {
+  if (useFirestore()) {
+    if (token) productionSessions.delete(crypto.createHash("sha256").update(token).digest("hex"));
+    return;
+  }
   if (token) db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(crypto.createHash("sha256").update(token).digest("hex"));
 }
 
