@@ -6,6 +6,8 @@ import fs from "fs/promises";
 import { Readable } from "node:stream";
 import bodyParser from "body-parser";
 import { google, drive_v3 } from "googleapis";
+import { getApps } from "firebase-admin/app";
+import { getStorage } from "firebase-admin/storage";
 import { addSeatAudit, attemptLogin, clearAuditLog, findLastYearUser, getDashboardData, getSeatStatuses, initDatabase, isValidSession, readApplicationState, revokeSession, setPassword, writeApplicationState } from "./database";
 import { SEATS } from "./src/MapData";
 
@@ -22,6 +24,7 @@ const DRIVE_PAYMENT_FOLDER_ID = process.env.DRIVE_PAYMENT_FOLDER_ID || "1j4rGV1i
 const SERVICE_ACCOUNT_PATH = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(process.cwd(), "firebase-service-account.json");
 const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL || "";
 const PAYMENT_STORAGE_SECRET = process.env.PAYMENT_STORAGE_SECRET || "";
+const FIREBASE_STORAGE_BUCKET = process.env.FIREBASE_STORAGE_BUCKET || "ahavat-menachem.firebasestorage.app";
 const MAX_PAYMENT_IMAGE_BYTES = 5 * 1024 * 1024;
 const SEAT_IDS = new Set(SEATS.map((seat) => seat.id));
 const DEVELOPER_PASSWORD = process.env.DEVELOPER_PASSWORD || "213223";
@@ -29,6 +32,21 @@ const DEVELOPER_SESSION_MS = 15 * 60 * 1000;
 let driveClientPromise: Promise<drive_v3.Drive | null> | null = null;
 
 const hasDriveBridge = () => Boolean(GOOGLE_APPS_SCRIPT_URL && PAYMENT_STORAGE_SECRET);
+const FIREBASE_IMAGE_PREFIX = "firebase:";
+
+const firebaseStorageBucket = () => {
+  // The Firebase Admin app is initialized together with Firestore before any
+  // API route is served. Keeping the bucket private means images can only be
+  // viewed through our authenticated endpoint below.
+  if (!getApps().length) return null;
+  return getStorage().bucket(FIREBASE_STORAGE_BUCKET);
+};
+
+const firebaseImagePathFromUrl = (imageUrl: string) => {
+  if (!imageUrl.startsWith("/api/payment-images/")) return null;
+  const id = decodeURIComponent(imageUrl.slice("/api/payment-images/".length));
+  return id.startsWith(FIREBASE_IMAGE_PREFIX) ? id.slice(FIREBASE_IMAGE_PREFIX.length) : null;
+};
 
 async function callDriveBridge(payload: Record<string, string>) {
   if (!hasDriveBridge()) throw new Error("אחסון צילומי התשלום אינו מוגדר");
@@ -157,6 +175,19 @@ async function storePaymentImage(paymentImage: unknown, requestId: string): Prom
   if (!image.length || image.length > MAX_PAYMENT_IMAGE_BYTES) throw new Error("גודל תמונת התשלום המרבי הוא 5MB");
   const extension = match[1] === "image/png" ? "png" : match[1] === "image/webp" ? "webp" : "jpg";
   const filename = `${requestId}.${extension}`;
+  const bucket = firebaseStorageBucket();
+  if (bucket) {
+    const objectName = `payment-images/${filename}`;
+    await bucket.file(objectName).save(image, {
+      resumable: false,
+      metadata: {
+        contentType: match[1],
+        cacheControl: "private, no-store",
+        metadata: { requestId },
+      },
+    });
+    return `/api/payment-images/${encodeURIComponent(`${FIREBASE_IMAGE_PREFIX}${objectName}`)}`;
+  }
   if (hasDriveBridge()) {
     const stored = await callDriveBridge({ action: "upload", filename, mimeType: match[1], data: match[2] });
     if (!stored.fileId) throw new Error("לא ניתן לשמור את צילום התשלום");
@@ -238,6 +269,12 @@ app.post("/api/admin/developer/unlock", adminAuth, (req, res) => {
 });
 
 const deleteStoredPaymentImage = async (imageUrl: string) => {
+  const firebasePath = firebaseImagePathFromUrl(imageUrl);
+  if (firebasePath) {
+    const bucket = firebaseStorageBucket();
+    if (bucket) await bucket.file(firebasePath).delete({ ignoreNotFound: true }).catch(() => undefined);
+    return;
+  }
   if (imageUrl.startsWith("/api/payment-images/")) {
     const fileId = imageUrl.slice("/api/payment-images/".length);
     if (hasDriveBridge()) {
@@ -256,6 +293,23 @@ const deleteStoredPaymentImage = async (imageUrl: string) => {
 app.get("/api/payment-images/:fileId", async (req, res) => {
   const token = typeof req.query.token === "string" ? req.query.token : "";
   if (!isValidSession(token)) return res.status(401).end();
+  const firebasePath = req.params.fileId.startsWith(FIREBASE_IMAGE_PREFIX) ? req.params.fileId.slice(FIREBASE_IMAGE_PREFIX.length) : null;
+  if (firebasePath) {
+    const bucket = firebaseStorageBucket();
+    if (!bucket) return res.status(503).end();
+    try {
+      const file = bucket.file(firebasePath);
+      const [metadata] = await file.getMetadata();
+      res.setHeader("Cache-Control", "private, no-store");
+      res.type(metadata.contentType || "image/jpeg");
+      file.createReadStream()
+        .on("error", () => { if (!res.headersSent) res.status(404).end(); else res.end(); })
+        .pipe(res);
+    } catch {
+      res.status(404).end();
+    }
+    return;
+  }
   if (hasDriveBridge()) {
     try {
       const image = await readFromDriveBridge(req.params.fileId);
