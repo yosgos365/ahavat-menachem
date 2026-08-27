@@ -8,7 +8,7 @@ import bodyParser from "body-parser";
 import { google, drive_v3 } from "googleapis";
 import { getApps } from "firebase-admin/app";
 import { getStorage } from "firebase-admin/storage";
-import { addSeatAudit, attemptLogin, clearAuditLog, findLastYearUser, getDashboardData, getSeatStatuses, initDatabase, isValidSession, readApplicationState, revokeSession, setPassword, writeApplicationState } from "./database";
+import { addSeatAudit, attemptLogin, clearAuditLog, createRequest, findLastYearUser, getDashboardData, getSeatStatuses, initDatabase, isValidSession, readApplicationState, revokeSession, setPassword, writeApplicationState } from "./database";
 import { SEATS } from "./src/MapData";
 
 export const app = express();
@@ -409,7 +409,6 @@ app.post("/api/admin/developer/create-demo", developerAuth, async (req, res) => 
 
 // Public: Submit a request
 app.post("/api/request", async (req, res) => {
-  const db = await readDB();
   const { firstName, lastName, phone, seats, paymentImage, isLastYearUser, lastYearSeats, lastYearIdentityConfirmed, lastYearChoice } = req.body;
   const normalizedPhone = typeof phone === "string" ? phone.replace(/[\s-]/g, "").replace(/^\+972/, "0") : "";
   const isTestRequest = typeof phone === "string" && phone.trim().toUpperCase() === "TRE";
@@ -441,24 +440,20 @@ app.post("/api/request", async (req, res) => {
     lastYearIdentityConfirmed: Boolean(lastYearIdentityConfirmed),
     lastYearChoice: lastYearChoice === "same-seat" || lastYearChoice === "different-seats" ? lastYearChoice : "not-confirmed",
     lastYearSeats,
+    seatChanges: [],
     paymentImage: paymentImageUrl,
     timestamp: Date.now(),
   };
   
-  db.requests.push(newRequest);
-  
-  // Mark seats as pending
-  for (const seatId of seats) {
-    if (!db.seats[seatId]) {
-      db.seats[seatId] = { status: "pending", reservedBy: requestId };
-    } else if (db.seats[seatId].status === "available") {
-      db.seats[seatId] = { status: "pending", reservedBy: requestId };
-    }
+  try {
+    // This is a Firestore transaction in production, so another submission or
+    // dashboard action cannot overwrite a newly received request.
+    await createRequest(newRequest);
+    res.json({ success: true, requestId });
+  } catch (error) {
+    await deleteStoredPaymentImage(paymentImageUrl);
+    res.status(503).json({ error: error instanceof Error ? error.message : "לא ניתן לשמור את הבקשה" });
   }
-  
-  await writeDB(db);
-  addSeatAudit("נשלחה בקשה", { actor: "לקוח", requestId, details: seats.join(", ") });
-  res.json({ success: true, requestId });
 });
 
 

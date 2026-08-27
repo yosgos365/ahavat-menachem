@@ -127,6 +127,56 @@ async function syncToFirestore(state: ApplicationState) {
   if (firestore) await firestore.collection("system").doc("applicationState").set({ ...state, updatedAt: Date.now() });
 }
 
+const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+
+// A serverless request reads a snapshot, changes only part of it, and may run
+// alongside another request. Merge that delta inside a Firestore transaction
+// instead of replacing the whole document with a stale snapshot.
+async function mergeStateIntoFirestore(nextState: ApplicationState) {
+  const firestore = await firestoreForProduction();
+  if (!firestore) throw new Error("חיבור Firestore אינו זמין");
+  const baseline = structuredClone(firestoreState || { seats: {}, requests: [], lastYearUsers: [] });
+  const reference = firestore.collection("system").doc("applicationState");
+  let merged: ApplicationState | null = null;
+
+  await firestore.runTransaction(async transaction => {
+    const snapshot = await transaction.get(reference);
+    const current = rebuildSeatIndex((snapshot.data() as ApplicationState | undefined) || baseline);
+    const mergeById = <T extends { id: string }>(currentItems: T[], baselineItems: T[], nextItems: T[]) => {
+      const currentById = new Map(currentItems.map(item => [item.id, item]));
+      const baselineById = new Map(baselineItems.map(item => [item.id, item]));
+      const nextById = new Map(nextItems.map(item => [item.id, item]));
+      for (const [id, before] of baselineById) {
+        const after = nextById.get(id);
+        if (!after) currentById.delete(id);
+        else if (!sameValue(before, after)) currentById.set(id, structuredClone(after));
+      }
+      for (const [id, after] of nextById) if (!baselineById.has(id)) currentById.set(id, structuredClone(after));
+      return [...currentById.values()];
+    };
+
+    const seats = { ...current.seats };
+    const seatIds = new Set([...Object.keys(baseline.seats), ...Object.keys(nextState.seats)]);
+    for (const id of seatIds) {
+      const before = baseline.seats[id];
+      const after = nextState.seats[id];
+      if (!after) {
+        if (before) delete seats[id];
+      } else if (!sameValue(before, after)) {
+        seats[id] = structuredClone(after);
+      }
+    }
+
+    merged = rebuildSeatIndex({
+      seats,
+      requests: mergeById(current.requests || [], baseline.requests || [], nextState.requests || []),
+      lastYearUsers: mergeById(current.lastYearUsers || [], baseline.lastYearUsers || [], nextState.lastYearUsers || []),
+    });
+    transaction.set(reference, { ...merged, updatedAt: Date.now() });
+  });
+  firestoreState = structuredClone(merged!);
+}
+
 const parseJson = <T>(value: string | null | undefined, fallback: T): T => {
   try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; }
 };
@@ -304,8 +354,7 @@ export function readApplicationState(): ApplicationState {
 
 export async function writeApplicationState(state: ApplicationState) {
   if (useFirestore()) {
-    firestoreState = structuredClone(rebuildSeatIndex(state));
-    await syncToFirestore(firestoreState);
+    await mergeStateIntoFirestore(rebuildSeatIndex(state));
     return;
   }
   db.exec("BEGIN");
@@ -386,14 +435,26 @@ export function findLastYearUser(firstName: string, lastName: string) {
   return row ? { found: true, name: `${row.first_name} ${row.last_name}`.trim(), seats: parseJson(row.seats_json, []) } : { found: false };
 }
 
-export function createRequest(request: RequestRecord) {
+export async function createRequest(request: RequestRecord) {
   if (useFirestore()) {
-    const state = firestoreState!;
-    state.requests.push({ ...structuredClone(request), status: "pending", seatChanges: [], requestedSeats: request.requestedSeats || request.seats, lastYearSeats: request.lastYearSeats || [] });
-    for (const seatId of request.seats) {
-      const seat = state.seats[seatId];
-      if (!seat || seat.status === "available") state.seats[seatId] = { status: "pending", reservedBy: request.id };
-    }
+    const firestore = await firestoreForProduction();
+    if (!firestore) throw new Error("חיבור Firestore אינו זמין");
+    const reference = firestore.collection("system").doc("applicationState");
+    let savedState: ApplicationState | null = null;
+    await firestore.runTransaction(async transaction => {
+      const snapshot = await transaction.get(reference);
+      const state = rebuildSeatIndex((snapshot.data() as ApplicationState | undefined) || { seats: {}, requests: [], lastYearUsers: structuredClone(TASHפו_USERS) });
+      if (!state.requests.some(item => item.id === request.id)) {
+        state.requests.push({ ...structuredClone(request), status: "pending", seatChanges: [], requestedSeats: request.requestedSeats || request.seats, lastYearSeats: request.lastYearSeats || [] });
+        for (const seatId of request.seats) {
+          const seat = state.seats[seatId];
+          if (!seat || seat.status === "available") state.seats[seatId] = { status: "pending", reservedBy: request.id };
+        }
+      }
+      savedState = state;
+      transaction.set(reference, { ...state, updatedAt: Date.now() });
+    });
+    firestoreState = structuredClone(savedState!);
     addAudit("נשלחה בקשה", { actor: "לקוח", requestId: request.id, details: request.seats.join(", ") });
     return;
   }
