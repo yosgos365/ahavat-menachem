@@ -3,6 +3,7 @@ import cors from "cors";
 import crypto from "node:crypto";
 import path from "path";
 import fs from "fs/promises";
+import { Readable } from "node:stream";
 import bodyParser from "body-parser";
 import { google, drive_v3 } from "googleapis";
 import { addSeatAudit, attemptLogin, clearAuditLog, findLastYearUser, getDashboardData, getSeatStatuses, initDatabase, isValidSession, readApplicationState, revokeSession, setPassword, writeApplicationState } from "./database";
@@ -130,7 +131,7 @@ async function storePaymentImage(paymentImage: unknown, requestId: string): Prom
   if (drive) {
     const created = await drive.files.create({
       requestBody: { name: filename, parents: [DRIVE_PAYMENT_FOLDER_ID], mimeType: match[1] },
-      media: { mimeType: match[1], body: image },
+      media: { mimeType: match[1], body: Readable.from(image) },
       fields: "id",
       supportsAllDrives: true,
     });
