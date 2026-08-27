@@ -314,13 +314,16 @@ const servePaymentImage = async (req: express.Request, res: express.Response) =>
     if (!bucket) return res.status(503).end();
     try {
       const file = bucket.file(firebasePath);
-      const [metadata] = await file.getMetadata();
-      // A Netlify Function must finish writing before its handler resolves.
-      // Piping a stream here can end the serverless response early, resulting
-      // in a broken <img> even though the object exists in Firebase Storage.
-      const [contents] = await file.download();
+      // Firebase signs this short-lived URL on the server. The browser then
+      // fetches the image directly from Storage, avoiding serverless-http's
+      // unreliable binary-response handling in a Netlify Function.
+      const [signedUrl] = await file.getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: Date.now() + 5 * 60 * 1000,
+      });
       res.setHeader("Cache-Control", "private, no-store");
-      res.type(metadata.contentType || "image/jpeg").send(contents);
+      res.redirect(302, signedUrl);
     } catch {
       res.status(404).end();
     }
