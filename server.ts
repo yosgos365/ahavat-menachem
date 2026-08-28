@@ -859,4 +859,7 @@ async function startServer() {
   });
 }
 
-if (!process.env.NETLIFY && process.env.VERCEL !== "1") startServer();
+// When the file is imported by a Vercel Function its process starts in
+// /var/task. Never call app.listen() there: Vercel owns the HTTP server.
+const isServerlessRuntime = process.env.NETLIFY === "true" || process.env.VERCEL === "1" || process.cwd().startsWith("/var/task");
+if (!isServerlessRuntime) startServer();
