@@ -93,7 +93,13 @@ let productionPasswordHash = crypto.pbkdf2Sync(process.env.ADMIN_PASSWORD || "mm
 const productionLoginAttempts = new Map<string, number[]>();
 // Serverless hosts have no persistent writable disk. They always use the
 // shared Firestore state, even if an environment variable was omitted.
-const useFirestore = () => process.env.USE_FIRESTORE === "true" || process.env.NETLIFY === "true" || process.env.VERCEL === "1";
+const useFirestore = () =>
+  process.env.USE_FIRESTORE === "true" ||
+  process.env.NETLIFY === "true" ||
+  process.env.VERCEL === "1" ||
+  // Vercel's function filesystem is mounted under /var/task and is read-only.
+  // This guard prevents any deployment configuration from falling back to SQLite.
+  process.cwd().startsWith("/var/task");
 
 async function firestoreForProduction() {
   if (!useFirestore()) return null;
