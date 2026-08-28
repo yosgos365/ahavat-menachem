@@ -1,5 +1,4 @@
 import type { Request, Response } from "express";
-import { app, initializeApplication } from "../server";
 
 // Vercel calls this function for every /api/* request. The existing Express
 // application remains the single implementation used locally and on Netlify.
@@ -13,6 +12,7 @@ export default async function handler(req: Request, res: Response) {
   if (req.url?.startsWith("/api/runtime-health")) {
     return res.status(200).json({ version: "2026-08-28-firestore", firestore: process.env.USE_FIRESTORE === "true" });
   }
+  const { app, initializeApplication } = await import("../dist/server.cjs");
   await initializeApplication();
   return app(req, res);
 }
